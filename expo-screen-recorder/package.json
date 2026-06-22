@@ -30,10 +30,7 @@
   "homepage": "https://github.com/tsnguyenducphuong/expo-screen-recorder#readme",
   "dependencies": {},
   "devDependencies": {
-    "@types/react": "~19.1.1",
-    "expo-module-scripts": "^5.0.8",
-    "expo": "^54.0.35",
-    "react-native": "0.81.4"
+    "expo-module-scripts": "^5.0.8"
   }, 
   "peerDependencies": {
     "expo": "*",

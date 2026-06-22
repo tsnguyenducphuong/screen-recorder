@@ -1,6 +1,5 @@
 {
   "compilerOptions": { 
-    "jsx": "react-native", 
     "rootDir": "./src",
     "outDir": "./build"
   },
