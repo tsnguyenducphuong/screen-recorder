@@ -3,7 +3,7 @@ apply plugin: 'kotlin-android'
 
 
 group = 'expo.modules.screenrecorder'
-version = '0.4.0'
+version = '0.5.0'
 
 def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
 apply from: expoModulesCorePlugin
@@ -16,7 +16,7 @@ android {
   namespace "expo.modules.screenrecorder"
   defaultConfig {
     versionCode 1
-    versionName "0.4.0"
+    versionName "0.5.0"
   }
   lintOptions {
     abortOnError false
