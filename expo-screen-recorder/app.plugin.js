@@ -52,4 +52,4 @@ function withScreenRecorderService(config) {
   });
 }
 
-module.exports = createRunOncePlugin(withScreenRecorderService, 'expo-screen-recorder', '1.2.4');
+module.exports = createRunOncePlugin(withScreenRecorderService, 'expo-screen-recorder', '1.2.8');
