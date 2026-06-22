@@ -39,7 +39,9 @@ class ScreenCaptureService : Service() {
         val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
         val quality     = intent?.getStringExtra("QUALITY")     ?: "high"
 
-        startForegroundNotification()
+        val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
+    
+        startForegroundNotification(includeAudio)
 
         if (resultData == null) {
             stopSelf()
@@ -109,7 +111,8 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun startForegroundNotification() {
+    // 2. Adjust the notification handler to double-stack the FGS types
+    private fun startForegroundNotification(includeAudio: Boolean) {
         val channelId = "screen_record_channel"
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -130,11 +133,14 @@ class ScreenCaptureService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                101,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            )
+            var serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            
+            // Android 14 (API 34) through Android 16 (API 36) requires explicit compounding for mic access
+            if (includeAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                serviceType = serviceType or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
+            
+            startForeground(101, notification, serviceType)
         } else {
             startForeground(101, notification)
         }

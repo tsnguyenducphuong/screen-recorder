@@ -1,6 +1,6 @@
 {
   "name": "expo-turbo-screen-recorder",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Expo Module For High Quality Screen Recorder",
   "main": "build/index.js",
   "types": "build/index.d.ts",
