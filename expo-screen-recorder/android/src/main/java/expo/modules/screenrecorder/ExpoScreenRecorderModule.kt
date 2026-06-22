@@ -1,14 +1,14 @@
 package expo.modules.screenrecorder
 
-import android.app.Activity
+// import android.app.Activity                                   // Unused: permission result check handled on the JS side
 import android.content.Context
 import android.content.Intent
-import android.media.projection.MediaProjectionManager
+// import android.media.projection.MediaProjectionManager        // Unused: screen capture intent built on the JS side
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import expo.modules.kotlin.Promise
-import expo.modules.kotlin.activityresult.AppContextActivityResultContract
-import expo.modules.kotlin.activityresult.AppContextActivityResultLauncher
+// import expo.modules.kotlin.activityresult.AppContextActivityResultContract  // Unused: no activity contract needed when JS owns permission
+// import expo.modules.kotlin.activityresult.AppContextActivityResultLauncher  // Unused: no activity contract needed when JS owns permission
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -17,15 +17,14 @@ import expo.modules.kotlin.records.Record
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
+// import kotlinx.coroutines.suspendCancellableCoroutine         // Unused: only needed by requestScreenCapturePermission
 import java.io.File
-import java.io.Serializable
+// import java.io.Serializable                                   // Unused: ScreenCaptureInput no longer needed
 import java.util.UUID
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
+// import kotlin.coroutines.resume                               // Unused: only needed by requestScreenCapturePermission
+// import kotlin.coroutines.resumeWithException                  // Unused: only needed by requestScreenCapturePermission
 
  
-
 // ---------------------------------------------------------------------------
 // Typed exception
 // ---------------------------------------------------------------------------
@@ -37,29 +36,31 @@ class ScreenRecorderException(
 
 // ---------------------------------------------------------------------------
 // Activity result contract types
+// NOTE: Permission is handled on the JS side — these types are kept for
+// reference but are not used at runtime.
 // ---------------------------------------------------------------------------
 
-data class ScreenCaptureInput(
-    val captureIntent: Intent
-) : Serializable
-
-data class ScreenCaptureResult(
-    val resultCode: Int,
-    val data: Intent?
-)
-
-class ScreenCaptureContract :
-    AppContextActivityResultContract<ScreenCaptureInput, ScreenCaptureResult> {
-
-    override fun createIntent(context: Context, input: ScreenCaptureInput): Intent =
-        input.captureIntent
-
-    override fun parseResult(
-        input: ScreenCaptureInput,
-        resultCode: Int,
-        intent: Intent?
-    ): ScreenCaptureResult = ScreenCaptureResult(resultCode, intent)
-}
+// data class ScreenCaptureInput(
+//     val captureIntent: Intent
+// ) : Serializable
+//
+// data class ScreenCaptureResult(
+//     val resultCode: Int,
+//     val data: Intent?
+// )
+//
+// class ScreenCaptureContract :
+//     AppContextActivityResultContract<ScreenCaptureInput, ScreenCaptureResult> {
+//
+//     override fun createIntent(context: Context, input: ScreenCaptureInput): Intent =
+//         input.captureIntent
+//
+//     override fun parseResult(
+//         input: ScreenCaptureInput,
+//         resultCode: Int,
+//         intent: Intent?
+//     ): ScreenCaptureResult = ScreenCaptureResult(resultCode, intent)
+// }
 
 // ---------------------------------------------------------------------------
 // Module
@@ -67,12 +68,12 @@ class ScreenCaptureContract :
 
 class ExpoScreenRecorderModule : Module() {
 
-    private lateinit var captureLauncher: AppContextActivityResultLauncher<
-        ScreenCaptureInput,
-        ScreenCaptureResult
-    >
+    // private lateinit var captureLauncher: AppContextActivityResultLauncher<
+    //     ScreenCaptureInput,
+    //     ScreenCaptureResult
+    // >
 
-    private var pendingContinuation: kotlinx.coroutines.CancellableContinuation<ScreenCaptureResult>? = null
+    // private var pendingContinuation: kotlinx.coroutines.CancellableContinuation<ScreenCaptureResult>? = null
     private var currentOutputFile: File? = null
     private var startTime: Long = 0L
     private var isRecording: Boolean = false
@@ -80,14 +81,14 @@ class ExpoScreenRecorderModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("ExpoScreenRecorder")
 
-        // Register the activity result contract on startup, mirroring OnCreate
-        // in the background remover — wiring up infrastructure before any call arrives.
-        RegisterActivityContracts {
-            captureLauncher = registerForActivityResult(ScreenCaptureContract()) { result ->
-                pendingContinuation?.resume(result)
-                pendingContinuation = null
-            }
-        }
+        // NOTE: RegisterActivityContracts is commented out — permission is handled
+        // on the JS side, so no activity result contract is needed here.
+        // RegisterActivityContracts {
+        //     captureLauncher = registerForActivityResult(ScreenCaptureContract()) { result ->
+        //         pendingContinuation?.resume(result)
+        //         pendingContinuation = null
+        //     }
+        // }
 
         // ---------------------------------------------------------------------------
         // isAvailableAsync — trivial synchronous check wrapped in the same
@@ -125,16 +126,15 @@ class ExpoScreenRecorderModule : Module() {
 
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    val captureResult = requestScreenCapturePermission(context)
-
-                    if (captureResult.resultCode != Activity.RESULT_OK || captureResult.data == null) {
-                        promise.reject(
-                            "ERR_PERMISSION_DENIED",
-                            "User declined screen recording permission.",
-                            null
-                        )
-                        return@launch
-                    }
+                    // NOTE: Permission is handled on the JS side before this function is called.
+                    // The captureResult (resultCode + data Intent) must be passed in from JS
+                    // once the JS layer obtains it via MediaProjection APIs.
+                    //
+                    // val captureResult = requestScreenCapturePermission(context)
+                    // if (captureResult.resultCode != Activity.RESULT_OK || captureResult.data == null) {
+                    //     promise.reject("ERR_PERMISSION_DENIED", "User declined screen recording permission.", null)
+                    //     return@launch
+                    // }
 
                     val outputFile = File(context.cacheDir, "REC_${UUID.randomUUID()}.mp4")
                     val includeAudioStream = options.includeAudio ?: false
@@ -150,8 +150,8 @@ class ExpoScreenRecorderModule : Module() {
                     }
 
                     val serviceIntent = Intent(context, ScreenCaptureService::class.java).apply {
-                        putExtra("RESULT_CODE",   captureResult.resultCode)
-                        putExtra("RESULT_DATA",   captureResult.data)
+                        // putExtra("RESULT_CODE", captureResult.resultCode)  // Provided by JS layer
+                        // putExtra("RESULT_DATA", captureResult.data)        // Provided by JS layer
                         putExtra("OUTPUT_PATH",   outputFile.absolutePath)
                         putExtra("WIDTH",         metrics.widthPixels)
                         putExtra("HEIGHT",        metrics.heightPixels)
@@ -225,29 +225,30 @@ class ExpoScreenRecorderModule : Module() {
     }
 
     // ---------------------------------------------------------------------------
-    // suspendCancellableCoroutine helper — bridges the activity-result callback
-    // into a suspend call, the same pattern used throughout the remover processor.
+    // NOTE: requestScreenCapturePermission is commented out — permission is
+    // handled on the JS side. Kept here for reference if the flow ever moves
+    // back to native.
     // ---------------------------------------------------------------------------
 
-    private suspend fun requestScreenCapturePermission(context: Context): ScreenCaptureResult {
-        val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val captureIntent = mgr.createScreenCaptureIntent()
-
-        return suspendCancellableCoroutine { cont ->
-            pendingContinuation = cont
-            cont.invokeOnCancellation { pendingContinuation = null }
-
-            try {
-                captureLauncher.launch(ScreenCaptureInput(captureIntent))
-            } catch (e: Exception) {
-                pendingContinuation = null
-                cont.resumeWithException(
-                    ScreenRecorderException(
-                        "ERR_LAUNCH_FAILED",
-                        "Failed to launch screen capture intent: ${e.message}"
-                    )
-                )
-            }
-        }
-    }
+    // private suspend fun requestScreenCapturePermission(context: Context): ScreenCaptureResult {
+    //     val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    //     val captureIntent = mgr.createScreenCaptureIntent()
+    //
+    //     return suspendCancellableCoroutine { cont ->
+    //         pendingContinuation = cont
+    //         cont.invokeOnCancellation { pendingContinuation = null }
+    //
+    //         try {
+    //             captureLauncher.launch(ScreenCaptureInput(captureIntent))
+    //         } catch (e: Exception) {
+    //             pendingContinuation = null
+    //             cont.resumeWithException(
+    //                 ScreenRecorderException(
+    //                     "ERR_LAUNCH_FAILED",
+    //                     "Failed to launch screen capture intent: ${e.message}"
+    //                 )
+    //             )
+    //         }
+    //     }
+    // }
 }
