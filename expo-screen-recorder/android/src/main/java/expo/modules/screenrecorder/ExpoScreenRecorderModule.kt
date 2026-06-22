@@ -23,16 +23,15 @@ import java.io.File
 import java.util.UUID
 // import kotlin.coroutines.resume                               // Unused: only needed by requestScreenCapturePermission
 // import kotlin.coroutines.resumeWithException                  // Unused: only needed by requestScreenCapturePermission
-
  
 // ---------------------------------------------------------------------------
 // Typed exception
 // ---------------------------------------------------------------------------
 
 class ScreenRecorderException(
-    override val code: String,
+    code: String,
     message: String
-) : CodedException(message)
+) : CodedException("[$code] $message")
 
 // ---------------------------------------------------------------------------
 // Activity result contract types
