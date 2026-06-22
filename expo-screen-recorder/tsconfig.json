@@ -1,0 +1,9 @@
+{
+  "compilerOptions": { 
+    "jsx": "react-native", 
+    "rootDir": "./src",
+    "outDir": "./build"
+  },
+  "include": ["./src"],
+  "exclude": ["**/__mocks__/*", "**/__tests__/*"]
+}

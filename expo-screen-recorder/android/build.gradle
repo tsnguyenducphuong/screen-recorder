@@ -1,0 +1,50 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+
+group = 'expo.modules.screenrecorder'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+
+android {
+  namespace "expo.modules.screenrecorder"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+
+dependencies {
+    // 2. Kotlin Standard Library (SDK 54 uses Kotlin 1.9+)
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8"
+
+    // 3. Android KTX for cleaner Kotlin code
+    implementation "androidx.core:core-ktx:1.12.0"
+
+    implementation "androidx.appcompat:appcompat:1.6.1"
+
+    // 4. Coroutines for background processing (Critical for VideoEncoder)
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2"
+
+
+    // 5. EXIF support for image rotation handling
+    implementation "androidx.exifinterface:exifinterface:1.3.6"
+    
+    // 6. Lifecycle KTX (Useful if you want to scope encoding to the app lifecycle)
+    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.7.0" 
+     
+    implementation("androidx.exifinterface:exifinterface:1.4.2")
+}
+
