@@ -6,35 +6,59 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.util.DisplayMetrics
 import android.view.WindowManager
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.activityresult.AppContextActivityResultContract
+import expo.modules.kotlin.activityresult.AppContextActivityResultLauncher
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.records.Field
 import expo.modules.kotlin.records.Record
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
+import java.io.Serializable
 import java.util.UUID
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+ 
+
 // ---------------------------------------------------------------------------
-// Custom AppContextActivityResultContract for the screen-capture permission
+// Typed exception
 // ---------------------------------------------------------------------------
 
-/**
- * Input carries everything needed to build the launch Intent.
- * Output wraps the system's resultCode + data so the coroutine can act on them.
- */
-data class ScreenCaptureInput(val captureIntent: Intent)
+class ScreenRecorderException(
+    override val code: String,
+    message: String
+) : CodedException(message)
 
-data class ScreenCaptureResult(val resultCode: Int, val data: Intent?)
+// ---------------------------------------------------------------------------
+// Activity result contract types
+// ---------------------------------------------------------------------------
 
-class ScreenCaptureContract : AppContextActivityResultContract<ScreenCaptureInput, ScreenCaptureResult> {
-    override fun createIntent(input: ScreenCaptureInput): Intent = input.captureIntent
+data class ScreenCaptureInput(
+    val captureIntent: Intent
+) : Serializable
 
-    override fun parseResult(resultCode: Int, intent: Intent?): ScreenCaptureResult =
-        ScreenCaptureResult(resultCode, intent)
+data class ScreenCaptureResult(
+    val resultCode: Int,
+    val data: Intent?
+)
+
+class ScreenCaptureContract :
+    AppContextActivityResultContract<ScreenCaptureInput, ScreenCaptureResult> {
+
+    override fun createIntent(context: Context, input: ScreenCaptureInput): Intent =
+        input.captureIntent
+
+    override fun parseResult(
+        input: ScreenCaptureInput,
+        resultCode: Int,
+        intent: Intent?
+    ): ScreenCaptureResult = ScreenCaptureResult(resultCode, intent)
 }
 
 // ---------------------------------------------------------------------------
@@ -43,11 +67,12 @@ class ScreenCaptureContract : AppContextActivityResultContract<ScreenCaptureInpu
 
 class ExpoScreenRecorderModule : Module() {
 
-    // FIX 1: Launcher is declared with lateinit and registered inside the
-    //         RegisterActivityContracts DSL block (not via a property delegate).
-    private lateinit var captureLauncher:
-            expo.modules.kotlin.activityresult.ActivityResultLauncher<ScreenCaptureInput>
+    private lateinit var captureLauncher: AppContextActivityResultLauncher<
+        ScreenCaptureInput,
+        ScreenCaptureResult
+    >
 
+    private var pendingContinuation: kotlinx.coroutines.CancellableContinuation<ScreenCaptureResult>? = null
     private var currentOutputFile: File? = null
     private var startTime: Long = 0L
     private var isRecording: Boolean = false
@@ -55,125 +80,174 @@ class ExpoScreenRecorderModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("ExpoScreenRecorder")
 
-        // FIX 2: RegisterActivityContracts is a DSL component inside definition(),
-        //         not a property delegate. registerForActivityResult receives
-        //         (contract, callback) — the callback stores a continuation that
-        //         lets us bridge the result back into the coroutine below.
+        // Register the activity result contract on startup, mirroring OnCreate
+        // in the background remover — wiring up infrastructure before any call arrives.
         RegisterActivityContracts {
-            captureLauncher = registerForActivityResult(ScreenCaptureContract()) { _, result ->
-                // Continuation is resumed in startRecordingAsync via suspendCancellableCoroutine.
-                // The result is delivered through the stored continuation reference.
+            captureLauncher = registerForActivityResult(ScreenCaptureContract()) { result ->
                 pendingContinuation?.resume(result)
                 pendingContinuation = null
             }
         }
 
-        AsyncFunction("isAvailableAsync") {
-            return@AsyncFunction true
-        }
+        // ---------------------------------------------------------------------------
+        // isAvailableAsync — trivial synchronous check wrapped in the same
+        // Promise + CoroutineScope pattern for consistency.
+        // ---------------------------------------------------------------------------
 
-        // FIX 3: Use "AsyncFunction(...) Coroutine { ... }" so that the Expo runtime
-        //         runs the body as a suspend function, letting us call captureLauncher.launch()
-        //         and suspendCancellableCoroutine inside it.
-        AsyncFunction("startRecordingAsync") Coroutine { options: RecordingOptions ->
-            if (isRecording) {
-                throw CodedException("ERR_ALREADY_RECORDING", "A recording sequence is already initialized.")
-            }
-
-            val context = appContext.reactContext
-                ?: throw CodedException("ERR_NO_CONTEXT", "React context unavailable.")
-            val activity = appContext.currentActivity
-                ?: throw CodedException("ERR_NO_ACTIVITY", "Current activity missing.")
-            val cacheDir = context.cacheDir
-                ?: throw CodedException("ERR_NO_CONTEXT", "Cache directory is unavailable.")
-
-            val includeAudioStream = options.includeAudio ?: false
-            val qualitySetting = options.quality ?: "high"
-            val outputFile = File(cacheDir, "REC_${UUID.randomUUID()}.mp4")
-
-            val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            val captureIntent = mgr.createScreenCaptureIntent()
-
-            // FIX 4: Bridge the activity-result callback into a coroutine via
-            //         suspendCancellableCoroutine. We store the continuation so
-            //         the RegisterActivityContracts callback above can resume it.
-            val captureResult: ScreenCaptureResult = suspendCancellableCoroutine { cont ->
-                pendingContinuation = cont
-                cont.invokeOnCancellation { pendingContinuation = null }
-
+        AsyncFunction("isAvailableAsync") { promise: Promise ->
+            CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    captureLauncher.launch(ScreenCaptureInput(captureIntent))
+                    promise.resolve(true)
                 } catch (e: Exception) {
-                    pendingContinuation = null
-                    cont.resumeWithException(
-                        CodedException("ERR_LAUNCH_FAILED", "Failed to launch screen capture intent: ${e.message}")
-                    )
+                    promise.reject("ERR_AVAILABILITY_CHECK", e.message, e)
                 }
             }
+        }
 
-            if (captureResult.resultCode != Activity.RESULT_OK || captureResult.data == null) {
-                // FIX 5: Reset isRecording on every failure path, not just the happy path.
-                throw CodedException("ERR_PERMISSION_DENIED", "User declined screen recording system permissions.")
+        // ---------------------------------------------------------------------------
+        // startRecordingAsync — requests the system screen-capture permission,
+        // then hands off to the foreground service.
+        // ---------------------------------------------------------------------------
+
+        AsyncFunction("startRecordingAsync") { options: RecordingOptions, promise: Promise ->
+            val context = appContext.reactContext ?: return@AsyncFunction promise.reject(
+                "ERR_NO_CONTEXT", "React context is unavailable.", null
+            )
+            val activity = appContext.currentActivity ?: return@AsyncFunction promise.reject(
+                "ERR_NO_ACTIVITY", "Current activity is missing.", null
+            )
+
+            if (isRecording) {
+                return@AsyncFunction promise.reject(
+                    "ERR_ALREADY_RECORDING", "A recording is already in progress.", null
+                )
             }
 
-            // Mark recording only after permission is granted.
-            isRecording = true
-            currentOutputFile = outputFile
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val captureResult = requestScreenCapturePermission(context)
 
-            val metrics = DisplayMetrics()
-            @Suppress("DEPRECATION")
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                activity.display?.getRealMetrics(metrics)
-            } else {
-                (activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
-                    .defaultDisplay.getRealMetrics(metrics)
-            }
+                    if (captureResult.resultCode != Activity.RESULT_OK || captureResult.data == null) {
+                        promise.reject(
+                            "ERR_PERMISSION_DENIED",
+                            "User declined screen recording permission.",
+                            null
+                        )
+                        return@launch
+                    }
 
-            val serviceIntent = Intent(context, ScreenCaptureService::class.java).apply {
-                putExtra("RESULT_CODE",   captureResult.resultCode)
-                putExtra("RESULT_DATA",   captureResult.data)
-                putExtra("OUTPUT_PATH",   outputFile.absolutePath)
-                putExtra("WIDTH",         metrics.widthPixels)
-                putExtra("HEIGHT",        metrics.heightPixels)
-                putExtra("DPI",           metrics.densityDpi)
-                putExtra("INCLUDE_AUDIO", includeAudioStream)
-                putExtra("QUALITY",       qualitySetting)
-            }
+                    val outputFile = File(context.cacheDir, "REC_${UUID.randomUUID()}.mp4")
+                    val includeAudioStream = options.includeAudio ?: false
+                    val qualitySetting = options.quality ?: "high"
 
-            startTime = System.currentTimeMillis()
-            try {
-                context.startForegroundService(serviceIntent)
-            } catch (e: Exception) {
-                // FIX 5 (cont.): Reset state if the service itself fails to start.
-                isRecording = false
-                currentOutputFile = null
-                throw CodedException("ERR_SERVICE_START", "Failed to start recording service: ${e.message}")
+                    val metrics = DisplayMetrics()
+                    @Suppress("DEPRECATION")
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                        activity.display?.getRealMetrics(metrics)
+                    } else {
+                        (activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+                            .defaultDisplay.getRealMetrics(metrics)
+                    }
+
+                    val serviceIntent = Intent(context, ScreenCaptureService::class.java).apply {
+                        putExtra("RESULT_CODE",   captureResult.resultCode)
+                        putExtra("RESULT_DATA",   captureResult.data)
+                        putExtra("OUTPUT_PATH",   outputFile.absolutePath)
+                        putExtra("WIDTH",         metrics.widthPixels)
+                        putExtra("HEIGHT",        metrics.heightPixels)
+                        putExtra("DPI",           metrics.densityDpi)
+                        putExtra("INCLUDE_AUDIO", includeAudioStream)
+                        putExtra("QUALITY",       qualitySetting)
+                    }
+
+                    isRecording = true
+                    currentOutputFile = outputFile
+                    startTime = System.currentTimeMillis()
+
+                    try {
+                        context.startForegroundService(serviceIntent)
+                        promise.resolve(null)
+                    } catch (e: Exception) {
+                        isRecording = false
+                        currentOutputFile = null
+                        promise.reject("ERR_SERVICE_START", "Failed to start recording service: ${e.message}", e)
+                    }
+
+                } catch (e: Exception) {
+                    promise.reject("ERR_START_RECORDING", e.message, e)
+                }
             }
         }
 
-        AsyncFunction("stopRecordingAsync") {
-            val context = appContext.reactContext
-                ?: throw CodedException("ERR_NO_CONTEXT", "Environment dropped.")
+        // ---------------------------------------------------------------------------
+        // stopRecordingAsync — stops the service and resolves with file URI + duration.
+        // ---------------------------------------------------------------------------
 
-            context.stopService(Intent(context, ScreenCaptureService::class.java))
-            isRecording = false
+        AsyncFunction("stopRecordingAsync") { promise: Promise ->
+            val context = appContext.reactContext ?: return@AsyncFunction promise.reject(
+                "ERR_NO_CONTEXT", "React context is unavailable.", null
+            )
 
-            val file = currentOutputFile
-            if (file == null || !file.exists()) {
-                throw CodedException("ERR_NO_FILE", "Output file missing or recording failed.")
+            if (!isRecording) {
+                return@AsyncFunction promise.reject(
+                    "ERR_NOT_RECORDING", "No recording is currently in progress.", null
+                )
             }
 
-            val durationSec = (System.currentTimeMillis() - startTime) / 1000.0
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    context.stopService(Intent(context, ScreenCaptureService::class.java))
+                    isRecording = false
 
-            // Returning a Map automatically resolves the JS Promise with an Object.
-            return@AsyncFunction mapOf(
-                "uri"      to "file://${file.absolutePath}",
-                "duration" to durationSec
-            )
+                    val file = currentOutputFile
+                    if (file == null || !file.exists()) {
+                        promise.reject(
+                            "ERR_NO_FILE",
+                            "Output file is missing or the recording failed.",
+                            null
+                        )
+                        return@launch
+                    }
+
+                    val durationSec = (System.currentTimeMillis() - startTime) / 1000.0
+
+                    promise.resolve(
+                        mapOf(
+                            "uri"      to "file://${file.absolutePath}",
+                            "duration" to durationSec
+                        )
+                    )
+                } catch (e: Exception) {
+                    promise.reject("ERR_STOP_RECORDING", e.message, e)
+                }
+            }
         }
     }
 
-    // Holds the coroutine continuation that is waiting for the activity result.
-    // Typed as nullable CancellableContinuation to support coroutine cancellation.
-    private var pendingContinuation: kotlinx.coroutines.CancellableContinuation<ScreenCaptureResult>? = null
+    // ---------------------------------------------------------------------------
+    // suspendCancellableCoroutine helper — bridges the activity-result callback
+    // into a suspend call, the same pattern used throughout the remover processor.
+    // ---------------------------------------------------------------------------
+
+    private suspend fun requestScreenCapturePermission(context: Context): ScreenCaptureResult {
+        val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val captureIntent = mgr.createScreenCaptureIntent()
+
+        return suspendCancellableCoroutine { cont ->
+            pendingContinuation = cont
+            cont.invokeOnCancellation { pendingContinuation = null }
+
+            try {
+                captureLauncher.launch(ScreenCaptureInput(captureIntent))
+            } catch (e: Exception) {
+                pendingContinuation = null
+                cont.resumeWithException(
+                    ScreenRecorderException(
+                        "ERR_LAUNCH_FAILED",
+                        "Failed to launch screen capture intent: ${e.message}"
+                    )
+                )
+            }
+        }
+    }
 }
