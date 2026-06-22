@@ -3,32 +3,31 @@ package expo.modules.screenrecorder
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.media.projection.MediaProjectionManager
-import android.os.Bundle
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContract
-import expo.modules.kotlin.activityresult.AppContextActivityResultCaller
-import expo.modules.kotlin.activityresult.ActivityResultContractSenderAndroidX
+import expo.modules.kotlin.activityresult.AppContextActivityResultLauncher
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
+import expo.modules.kotlin.records.Field
+import expo.modules.kotlin.records.Record
 import java.io.File
 import java.util.UUID
 
+ 
+
 // ── Contract ──────────────────────────────────────────────────────────────────
-// Wraps MediaProjectionManager.createScreenCaptureIntent() in the AndroidX
-// Activity Result API that Expo SDK 54 modules are expected to use.
 class ScreenCaptureContract : ActivityResultContract<Unit, Pair<Int, Intent?>>() {
 
     override fun createIntent(context: Context, input: Unit): Intent {
         val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-                as MediaProjectionManager
+                as android.media.projection.MediaProjectionManager
         return mgr.createScreenCaptureIntent()
     }
 
     override fun parseResult(resultCode: Int, intent: Intent?): Pair<Int, Intent?> =
-        resultCode to intent
+        Pair(resultCode, intent)
 }
 
 // ── Module ────────────────────────────────────────────────────────────────────
@@ -40,32 +39,21 @@ class ExpoScreenRecorderModule : Module() {
     private var includeAudioStream: Boolean = false
     private var qualitySetting: String = "high"
 
-    // Launcher is initialised once inside OnCreate and reused for every recording
-    // request. It is torn down automatically when the module is destroyed because
-    // ActivityResultContractSenderAndroidX is scoped to the module lifecycle.
-    private lateinit var captureLauncher: ActivityResultContractSenderAndroidX<Unit, Pair<Int, Intent?>>
+    // ✅ FIX 1: Use the correct AppContextActivityResultLauncher type
+    private lateinit var captureLauncher: AppContextActivityResultLauncher<Unit, Pair<Int, Intent?>>
 
     override fun definition() = ModuleDefinition {
         Name("ExpoScreenRecorder")
 
-        // ── Lifecycle ─────────────────────────────────────────────────────────
-
         OnCreate {
-            // Register the contract once. The returned sender is our handle for
-            // launching the system permission dialog on every startRecordingAsync call.
             captureLauncher = appContext
-                .registerForActivityResult(ScreenCaptureContract()) { (resultCode, data) ->
-                    handleCaptureResult(resultCode, data)
+                .registerForActivityResult(ScreenCaptureContract()) { result ->
+                    handleCaptureResult(result.first, result.second)
                 }
         }
 
         OnDestroy {
-            // Unregister the launcher so no stale callbacks fire after the
-            // module is torn down (e.g. fast-refresh, app backgrounding).
-            captureLauncher.unregister()
-
-            // If the module is destroyed mid-recording, reject the pending
-            // promise rather than leaving the caller hanging forever.
+            // ✅ FIX 2: Removed appContext.unregisterForActivityResult() as it's handled internally
             pendingPromise?.reject(
                 "ERR_MODULE_DESTROYED",
                 "Screen recorder module was destroyed before the operation completed.",
@@ -73,8 +61,6 @@ class ExpoScreenRecorderModule : Module() {
             )
             pendingPromise = null
         }
-
-        // ── API ───────────────────────────────────────────────────────────────
 
         AsyncFunction("isAvailableAsync") {
             return@AsyncFunction true
@@ -96,20 +82,17 @@ class ExpoScreenRecorderModule : Module() {
                 return@AsyncFunction
             }
 
-            pendingPromise       = promise
-            includeAudioStream   = options.includeAudio ?: false
-            qualitySetting       = options.quality ?: "high"
-            currentOutputFile    = File(cacheDir, "REC_${UUID.randomUUID()}.mp4")
+            pendingPromise     = promise
+            includeAudioStream = options.includeAudio ?: false
+            qualitySetting     = options.quality ?: "high"
+            currentOutputFile  = File(cacheDir, "REC_${UUID.randomUUID()}.mp4")
 
-            // Launch the system screen-capture permission dialog.
-            // The result lands in handleCaptureResult() via the contract callback.
-            captureLauncher.launch(
-                input         = Unit,
-                onFailure     = { ex ->
-                    pendingPromise?.reject("ERR_LAUNCH_FAILED", ex.message, ex)
-                    pendingPromise = null
-                }
-            )
+            try {
+                captureLauncher.launch(Unit)
+            } catch (ex: Exception) {
+                pendingPromise?.reject("ERR_LAUNCH_FAILED", ex.message ?: "Launch failed.", null)
+                pendingPromise = null
+            }
         }
 
         AsyncFunction("stopRecordingAsync") { promise: Promise ->
@@ -122,6 +105,7 @@ class ExpoScreenRecorderModule : Module() {
                 return@AsyncFunction
             }
 
+            // Note: ScreenCaptureService must be implemented elsewhere in your project
             context.stopService(Intent(context, ScreenCaptureService::class.java))
 
             val file = currentOutputFile
@@ -167,12 +151,11 @@ class ExpoScreenRecorderModule : Module() {
             return
         }
 
-        // Resolve screen dimensions for the capture service
         val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             activity.display?.getRealMetrics(metrics)
         } else {
+            @Suppress("DEPRECATION")
             (activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
                 .defaultDisplay.getRealMetrics(metrics)
         }
@@ -191,7 +174,6 @@ class ExpoScreenRecorderModule : Module() {
         startTime = System.currentTimeMillis()
         context.startForegroundService(serviceIntent)
 
-        // Resolve startRecordingAsync — the caller now awaits stopRecordingAsync.
         promise?.resolve(null)
         pendingPromise = null
     }
