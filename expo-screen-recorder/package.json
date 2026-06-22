@@ -1,6 +1,6 @@
 {
   "name": "expo-screen-recorder",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Expo Module For High Quality Screen Recorder",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -28,10 +28,9 @@
   "author": "tsnguyenducphuong <ts.nguyenducphuong@gmail.com> (https://github.com/tsnguyenducphuong)",
   "license": "MIT",
   "homepage": "https://github.com/tsnguyenducphuong/expo-screen-recorder#readme",
-  "dependencies": {},
   "devDependencies": {
     "expo-module-scripts": "^5.0.8"
-  }, 
+  },
   "peerDependencies": {
     "expo": "*",
     "react": "*",
