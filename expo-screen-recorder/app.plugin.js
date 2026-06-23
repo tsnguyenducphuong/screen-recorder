@@ -1,5 +1,4 @@
 "use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
 const config_plugins_1 = require("@expo/config-plugins");
 /**
  * Expo config plugin — adds foreground service permissions and the
@@ -68,4 +67,4 @@ const withScreenRecorderService = (config) => {
         return config;
     });
 };
-exports.default = withScreenRecorderService;
+module.exports = (0, config_plugins_1.createRunOncePlugin)(withScreenRecorderService, 'expo-screen-recorder', '1.3.0');

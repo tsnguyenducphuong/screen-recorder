@@ -1,5 +1,6 @@
 import {
   ConfigPlugin,
+  createRunOncePlugin,
   withAndroidManifest,
 } from '@expo/config-plugins';
 
@@ -85,4 +86,4 @@ const withScreenRecorderService: ConfigPlugin<void> = (config) => {
   });
 };
 
-export default withScreenRecorderService;
+export = createRunOncePlugin(withScreenRecorderService, 'expo-screen-recorder', '1.3.0');
