@@ -11,7 +11,6 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-
 import java.io.File
 
 class ScreenCaptureService : Service() {
@@ -32,23 +31,30 @@ class ScreenCaptureService : Service() {
             @Suppress("DEPRECATION")
             intent?.getParcelableExtra("RESULT_DATA")
         }
-        val outputPath  = intent?.getStringExtra("OUTPUT_PATH") ?: ""
-        val width       = intent?.getIntExtra("WIDTH", 720)     ?: 720
-        val height      = intent?.getIntExtra("HEIGHT", 1280)   ?: 1280
-        val dpi         = intent?.getIntExtra("DPI", 1)         ?: 1
+        val outputPath   = intent?.getStringExtra("OUTPUT_PATH") ?: ""
+        val width        = intent?.getIntExtra("WIDTH", 720)     ?: 720
+        val height       = intent?.getIntExtra("HEIGHT", 1280)   ?: 1280
+        val dpi          = intent?.getIntExtra("DPI", 1)         ?: 1
         val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
-        val quality     = intent?.getStringExtra("QUALITY")     ?: "high"
-    
-        startForegroundNotification(includeAudio)
+        val quality      = intent?.getStringExtra("QUALITY")     ?: "high"
 
+        // ✅ Step 1: guard first — no point proceeding without a valid token
         if (resultData == null) {
             stopSelf()
             return START_NOT_STICKY
         }
 
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+
+        // ✅ Step 2: create the MediaProjection token BEFORE startForeground
+        // Android 14+ (API 34+) validates the live token when startForeground
+        // is called with FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION — no token = SecurityException
         mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
 
+        // ✅ Step 3: now safe to call startForeground — token exists
+        startForegroundNotification(includeAudio)
+
+        // ✅ Step 4: set up recorder and display
         setupMediaRecorder(outputPath, width, height, includeAudio, quality)
 
         virtualDisplay = mediaProjection?.createVirtualDisplay(
@@ -109,7 +115,6 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    // 2. Adjust the notification handler to double-stack the FGS types
     private fun startForegroundNotification(includeAudio: Boolean) {
         val channelId = "screen_record_channel"
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -132,12 +137,10 @@ class ScreenCaptureService : Service() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            
-            // Android 14 (API 34) through Android 16 (API 36) requires explicit compounding for mic access
             if (includeAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                serviceType = serviceType or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                serviceType = serviceType or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
-            
             startForeground(101, notification, serviceType)
         } else {
             startForeground(101, notification)
@@ -153,7 +156,7 @@ class ScreenCaptureService : Service() {
         mediaRecorder?.release()
         mediaRecorder = null
 
-        virtualDisplay?.release()   // release display before stopping projection
+        virtualDisplay?.release()
         virtualDisplay = null
 
         mediaProjection?.stop()
