@@ -21,11 +21,16 @@ class ScreenCaptureService : Service() {
     private var mediaRecorder: MediaRecorder? = null
     private var isRecording = false
 
-    // Required on API 34+: projection can be revoked externally (e.g. user dismisses
-    // the notification). We must listen and tear down gracefully.
+    // Tracks whether cleanUp() is already running to prevent reentrant calls
+    // (e.g. onDestroy fires while projectionCallback.onStop() is mid-execution).
+    private var isCleaningUp = false
+
+    // API 34+: the OS can revoke the projection at any time (user dismisses the
+    // cast notification, another app steals it, etc.). We register this before
+    // createVirtualDisplay() and unregister before mediaProjection.stop().
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
-            // Called on the main thread when the system revokes the projection.
+            // Runs on the Handler thread we pass to registerCallback() — main looper.
             cleanUp()
         }
     }
@@ -36,9 +41,8 @@ class ScreenCaptureService : Service() {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED)
             ?: Activity.RESULT_CANCELED
 
-        // Capture as a local val with explicit non-null check below.
-        // The two-branch SDK check prevents Kotlin smart-cast from narrowing to Intent,
-        // so we store it as Intent? and guard explicitly.
+        // Stored as Intent? because the two-branch SDK check blocks Kotlin smart-cast.
+        // We null-check explicitly below before passing to startRecording().
         val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("RESULT_DATA", Intent::class.java)
         } else {
@@ -53,22 +57,21 @@ class ScreenCaptureService : Service() {
         val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
         val quality      = intent?.getStringExtra("QUALITY")     ?: "high"
 
-        // Step 1: Call startForeground() FIRST so the OS registers the mediaProjection
-        // foreground service type before getMediaProjection() is called.
+        // ── Rule 1: startForeground() MUST be called before getMediaProjection().
+        // On targetSDK 36 the OS validates the mediaProjection FGS type is active
+        // server-side before it will hand out the projection token.
         startForegroundNotification(includeAudio)
 
-        // Fix: explicit non-null check after startForeground so stopSelf() is safe to call.
         if (resultData == null) {
             stopForegroundCompat()
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // Step 2: postDelayed yields the main thread looper so the Binder IPC for
-        // startForeground() can fully complete on the system side first.
-        // On targetSDK 36, calling getMediaProjection() synchronously after startForeground()
-        // on the same thread races against the OS registering the service type, causing
-        // a SecurityException. Thread.sleep() would deadlock the looper instead.
+        // ── Rule 2: postDelayed yields the main looper so the Binder round-trip for
+        // startForeground() completes on ActivityManagerService before we call
+        // getMediaProjection(). Thread.sleep() on the main thread would block the
+        // looper that needs to receive the Binder reply — a deadlock, not a solution.
         Handler(mainLooper).postDelayed({
             startRecording(resultCode, resultData, outputPath, width, height, dpi, includeAudio, quality)
         }, 300L)
@@ -78,7 +81,7 @@ class ScreenCaptureService : Service() {
 
     private fun startRecording(
         resultCode: Int,
-        resultData: Intent,       // non-null: caller already checked
+        resultData: Intent,
         outputPath: String,
         width: Int,
         height: Int,
@@ -88,7 +91,11 @@ class ScreenCaptureService : Service() {
     ) {
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-        // Acquire the one-time MediaProjection token.
+        // ── Security check: getMediaProjection() throws SecurityException if:
+        //   • the FGS mediaProjection type isn't fully registered yet  (race — solved by postDelayed)
+        //   • the token was already consumed (one-time use)
+        //   • resultCode != RESULT_OK
+        // All three are caught and handled without crashing.
         try {
             mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
         } catch (e: SecurityException) {
@@ -109,10 +116,11 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        // Fix: register the projection callback BEFORE createVirtualDisplay().
-        // Required on API 34+; safe to call on all versions via the compat branch.
-        // Without this, the OS may silently revoke the projection on API 34+ and
-        // we'd have no way to clean up.
+        // ── Rule 3: register the callback on the main looper BEFORE createVirtualDisplay().
+        // On API 34+ this is required — without it the system logs a strict-mode
+        // violation and may refuse to honour the projection.
+        // We guard with UPSIDE_DOWN_CAKE (API 34) because that's when the requirement
+        // was introduced; the call is safe on earlier APIs too but isn't mandatory.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             mediaProjection!!.registerCallback(projectionCallback, Handler(mainLooper))
         }
@@ -192,8 +200,7 @@ class ScreenCaptureService : Service() {
 
     private fun startForegroundNotification(includeAudio: Boolean) {
         val channelId = "screen_record_channel"
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE)
-            as NotificationManager
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -213,7 +220,7 @@ class ScreenCaptureService : Service() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-
+            // MICROPHONE type is only required/allowed as an additional type from API 34+.
             if (includeAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 serviceType = serviceType or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
@@ -223,7 +230,6 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    // Dismiss the persistent notification before stopping, compatible across API levels.
     private fun stopForegroundCompat() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -234,6 +240,14 @@ class ScreenCaptureService : Service() {
     }
 
     private fun cleanUp() {
+        // Guard against reentrant calls: projectionCallback.onStop() and onDestroy()
+        // can both fire in close succession (e.g. user revokes cast permission just
+        // as the service is being stopped). Without this gate, mediaRecorder?.stop()
+        // could be called twice on an already-released recorder, throwing an
+        // IllegalStateException that would crash the app.
+        if (isCleaningUp) return
+        isCleaningUp = true
+
         try { if (isRecording) mediaRecorder?.stop() } catch (_: Exception) {}
         isRecording = false
 
@@ -243,8 +257,7 @@ class ScreenCaptureService : Service() {
         virtualDisplay?.release()
         virtualDisplay = null
 
-        // Unregister the callback before stopping the projection to avoid a
-        // callback firing after resources are already released.
+        // Unregister BEFORE stop() so the callback can't fire after resources are freed.
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 mediaProjection?.unregisterCallback(projectionCallback)
