@@ -4,6 +4,8 @@ import {
   withAndroidManifest,
 } from '@expo/config-plugins';
 
+const pkg = require('expo-turbo-screen-recorder/package.json');
+
 /**
  * Expo config plugin — adds foreground service permissions and the
  * ScreenCaptureService declaration required by the screen recorder module
@@ -86,4 +88,4 @@ const withScreenRecorderService: ConfigPlugin<void> = (config) => {
   });
 };
 
-export default createRunOncePlugin(withScreenRecorderService, 'expo-screen-recorder', '1.3.0');
+export default createRunOncePlugin(withScreenRecorderService, pkg.name, pkg.version);

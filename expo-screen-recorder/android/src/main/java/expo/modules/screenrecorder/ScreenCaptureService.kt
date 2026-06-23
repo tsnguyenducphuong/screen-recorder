@@ -38,8 +38,6 @@ class ScreenCaptureService : Service() {
         val dpi         = intent?.getIntExtra("DPI", 1)         ?: 1
         val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
         val quality     = intent?.getStringExtra("QUALITY")     ?: "high"
-
-        val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
     
         startForegroundNotification(includeAudio)
 
