@@ -38,7 +38,14 @@ class ScreenCaptureService : Service() {
         val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
         val quality      = intent?.getStringExtra("QUALITY")     ?: "high"
 
-        // ✅ Step 1: guard first — no point proceeding without a valid token
+        // ✅ Fix 1: startForeground MUST be called before anything that can throw
+        // to satisfy Android's 5-second foreground service contract.
+        // We call it unconditionally first — even before resultData validation —
+        // so the system always sees startForeground() called after startForegroundService().
+        startForegroundNotification(includeAudio)
+
+        // ✅ Fix 2: guard after startForeground — stopSelf() is now safe because
+        // startForeground has already been called, satisfying the ANR contract
         if (resultData == null) {
             stopSelf()
             return START_NOT_STICKY
@@ -46,33 +53,67 @@ class ScreenCaptureService : Service() {
 
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-        // ✅ Step 2: create the MediaProjection token BEFORE startForeground
-        // Android 14+ (API 34+) validates the live token when startForeground
-        // is called with FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION — no token = SecurityException
-        mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
+        // ✅ Fix 3: wrap getMediaProjection — token can be stale if the activity
+        // result was delayed or the user rotated the screen during permission dialog
+        try {
+            mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
-        // ✅ Step 3: now safe to call startForeground — token exists
-        startForegroundNotification(includeAudio)
+        // ✅ Fix 4: wrap setupMediaRecorder — prepare() throws on invalid path,
+        // codec mismatch, or insufficient storage; must not crash before onDestroy
+        try {
+            setupMediaRecorder(outputPath, width, height, includeAudio, quality)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            mediaProjection?.stop()
+            mediaProjection = null
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
-        // ✅ Step 4: set up recorder and display
-        setupMediaRecorder(outputPath, width, height, includeAudio, quality)
+        // ✅ Fix 5: wrap createVirtualDisplay — can return null if projection
+        // token was already consumed or display metrics are invalid
+        try {
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ExpoScreenCapture",
+                width,
+                height,
+                dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                mediaRecorder?.surface,
+                null,
+                null
+            )
+            if (virtualDisplay == null) {
+                throw IllegalStateException("createVirtualDisplay returned null")
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            mediaRecorder?.release()
+            mediaRecorder = null
+            mediaProjection?.stop()
+            mediaProjection = null
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ExpoScreenCapture",
-            width,
-            height,
-            dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            mediaRecorder?.surface,
-            null,
-            null
-        )
-
+        // ✅ Fix 6: wrap start() separately from setup — start() fails if the
+        // surface from createVirtualDisplay isn't ready yet or encoder init failed
         try {
             mediaRecorder?.start()
             isRecording = true
         } catch (e: Exception) {
             e.printStackTrace()
+            virtualDisplay?.release()
+            virtualDisplay = null
+            mediaRecorder?.release()
+            mediaRecorder = null
+            mediaProjection?.stop()
+            mediaProjection = null
             stopSelf()
         }
 
@@ -117,7 +158,8 @@ class ScreenCaptureService : Service() {
 
     private fun startForegroundNotification(includeAudio: Boolean) {
         val channelId = "screen_record_channel"
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE)
+            as NotificationManager
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -136,7 +178,8 @@ class ScreenCaptureService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            var serviceType =
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             if (includeAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 serviceType = serviceType or
                     android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
@@ -156,7 +199,7 @@ class ScreenCaptureService : Service() {
         mediaRecorder?.release()
         mediaRecorder = null
 
-        virtualDisplay?.release()
+        virtualDisplay?.release()   // display before projection — correct teardown order
         virtualDisplay = null
 
         mediaProjection?.stop()
