@@ -38,33 +38,43 @@ class ScreenCaptureService : Service() {
         val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
         val quality      = intent?.getStringExtra("QUALITY")     ?: "high"
 
-        // ✅ Fix 1: startForeground MUST be called before anything that can throw
-        // to satisfy Android's 5-second foreground service contract.
-        // We call it unconditionally first — even before resultData validation —
-        // so the system always sees startForeground() called after startForegroundService().
+        // ✅ Fix 1: Establish foreground state FIRST
         startForegroundNotification(includeAudio)
 
-        // ✅ Fix 2: guard after startForeground — stopSelf() is now safe because
-        // startForeground has already been called, satisfying the ANR contract
         if (resultData == null) {
             stopSelf()
             return START_NOT_STICKY
         }
 
+        // ✅ Fix 2: Poll and retry with a small delay to handle targetSDK 36 asynchronous Binder lag.
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        var attempts = 0
+        val maxAttempts = 5
+        val delayMs = 100L
 
-        // ✅ Fix 3: wrap getMediaProjection — token can be stale if the activity
-        // result was delayed or the user rotated the screen during permission dialog
-        try {
-            mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            stopSelf()
-            return START_NOT_STICKY
+        while (attempts < maxAttempts) {
+            try {
+                attempts++
+                mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
+                if (mediaProjection != null) {
+                    break // Successfully acquired the token, break the loop
+                }
+            } catch (e: SecurityException) {
+                if (attempts >= maxAttempts) {
+                    // Exhausted all retries, fail safely without crashing the app
+                    e.printStackTrace()
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                // Sleep for 100ms to let the startForeground registration finalize on the OS side
+                try { Thread.sleep(delayMs) } catch (_: InterruptedException) {}
+            } catch (e: Exception) {
+                e.printStackTrace()
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
 
-        // ✅ Fix 4: wrap setupMediaRecorder — prepare() throws on invalid path,
-        // codec mismatch, or insufficient storage; must not crash before onDestroy
         try {
             setupMediaRecorder(outputPath, width, height, includeAudio, quality)
         } catch (e: Exception) {
@@ -75,8 +85,6 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        // ✅ Fix 5: wrap createVirtualDisplay — can return null if projection
-        // token was already consumed or display metrics are invalid
         try {
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ExpoScreenCapture",
@@ -101,8 +109,6 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        // ✅ Fix 6: wrap start() separately from setup — start() fails if the
-        // surface from createVirtualDisplay isn't ready yet or encoder init failed
         try {
             mediaRecorder?.start()
             isRecording = true
@@ -178,11 +184,11 @@ class ScreenCaptureService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var serviceType =
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            var serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            
+            // ✅ Fix 3: Explicitly bind MICROPHONE type if audio is included.
             if (includeAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                serviceType = serviceType or
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                serviceType = serviceType or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
             startForeground(101, notification, serviceType)
         } else {
@@ -199,7 +205,7 @@ class ScreenCaptureService : Service() {
         mediaRecorder?.release()
         mediaRecorder = null
 
-        virtualDisplay?.release()   // display before projection — correct teardown order
+        virtualDisplay?.release()
         virtualDisplay = null
 
         mediaProjection?.stop()
