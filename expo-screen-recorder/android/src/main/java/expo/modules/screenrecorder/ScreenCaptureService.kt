@@ -21,17 +21,31 @@ class ScreenCaptureService : Service() {
     private var mediaRecorder: MediaRecorder? = null
     private var isRecording = false
 
+    // Required on API 34+: projection can be revoked externally (e.g. user dismisses
+    // the notification). We must listen and tear down gracefully.
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            // Called on the main thread when the system revokes the projection.
+            cleanUp()
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED)
             ?: Activity.RESULT_CANCELED
-        val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+
+        // Capture as a local val with explicit non-null check below.
+        // The two-branch SDK check prevents Kotlin smart-cast from narrowing to Intent,
+        // so we store it as Intent? and guard explicitly.
+        val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("RESULT_DATA", Intent::class.java)
         } else {
             @Suppress("DEPRECATION")
             intent?.getParcelableExtra("RESULT_DATA")
         }
+
         val outputPath   = intent?.getStringExtra("OUTPUT_PATH") ?: ""
         val width        = intent?.getIntExtra("WIDTH", 720)     ?: 720
         val height       = intent?.getIntExtra("HEIGHT", 1280)   ?: 1280
@@ -39,19 +53,22 @@ class ScreenCaptureService : Service() {
         val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
         val quality      = intent?.getStringExtra("QUALITY")     ?: "high"
 
-        // Step 1: Establish foreground state FIRST so the OS registers the service type.
+        // Step 1: Call startForeground() FIRST so the OS registers the mediaProjection
+        // foreground service type before getMediaProjection() is called.
         startForegroundNotification(includeAudio)
 
+        // Fix: explicit non-null check after startForeground so stopSelf() is safe to call.
         if (resultData == null) {
+            stopForegroundCompat()
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // Step 2: Yield the main thread via postDelayed so the Binder IPC for startForeground()
-        // can complete on the system side before getMediaProjection() is called.
+        // Step 2: postDelayed yields the main thread looper so the Binder IPC for
+        // startForeground() can fully complete on the system side first.
         // On targetSDK 36, calling getMediaProjection() synchronously after startForeground()
-        // on the same thread causes a SecurityException because the OS hasn't finished
-        // registering the mediaProjection foreground service type yet.
+        // on the same thread races against the OS registering the service type, causing
+        // a SecurityException. Thread.sleep() would deadlock the looper instead.
         Handler(mainLooper).postDelayed({
             startRecording(resultCode, resultData, outputPath, width, height, dpi, includeAudio, quality)
         }, 300L)
@@ -61,7 +78,7 @@ class ScreenCaptureService : Service() {
 
     private fun startRecording(
         resultCode: Int,
-        resultData: Intent,
+        resultData: Intent,       // non-null: caller already checked
         outputPath: String,
         width: Int,
         height: Int,
@@ -71,21 +88,33 @@ class ScreenCaptureService : Service() {
     ) {
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
+        // Acquire the one-time MediaProjection token.
         try {
             mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
         } catch (e: SecurityException) {
             e.printStackTrace()
+            stopForegroundCompat()
             stopSelf()
             return
         } catch (e: Exception) {
             e.printStackTrace()
+            stopForegroundCompat()
             stopSelf()
             return
         }
 
         if (mediaProjection == null) {
+            stopForegroundCompat()
             stopSelf()
             return
+        }
+
+        // Fix: register the projection callback BEFORE createVirtualDisplay().
+        // Required on API 34+; safe to call on all versions via the compat branch.
+        // Without this, the OS may silently revoke the projection on API 34+ and
+        // we'd have no way to clean up.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            mediaProjection!!.registerCallback(projectionCallback, Handler(mainLooper))
         }
 
         try {
@@ -93,7 +122,6 @@ class ScreenCaptureService : Service() {
         } catch (e: Exception) {
             e.printStackTrace()
             cleanUp()
-            stopSelf()
             return
         }
 
@@ -114,7 +142,6 @@ class ScreenCaptureService : Service() {
         } catch (e: Exception) {
             e.printStackTrace()
             cleanUp()
-            stopSelf()
             return
         }
 
@@ -124,7 +151,6 @@ class ScreenCaptureService : Service() {
         } catch (e: Exception) {
             e.printStackTrace()
             cleanUp()
-            stopSelf()
         }
     }
 
@@ -197,15 +223,39 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    // Dismiss the persistent notification before stopping, compatible across API levels.
+    private fun stopForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+    }
+
     private fun cleanUp() {
         try { if (isRecording) mediaRecorder?.stop() } catch (_: Exception) {}
         isRecording = false
+
         mediaRecorder?.release()
         mediaRecorder = null
+
         virtualDisplay?.release()
         virtualDisplay = null
+
+        // Unregister the callback before stopping the projection to avoid a
+        // callback firing after resources are already released.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                mediaProjection?.unregisterCallback(projectionCallback)
+            }
+        } catch (_: Exception) {}
+
         mediaProjection?.stop()
         mediaProjection = null
+
+        stopForegroundCompat()
+        stopSelf()
     }
 
     override fun onDestroy() {
