@@ -86,4 +86,4 @@ const withScreenRecorderService: ConfigPlugin<void> = (config) => {
   });
 };
 
-export = createRunOncePlugin(withScreenRecorderService, 'expo-screen-recorder', '1.3.0');
+export default createRunOncePlugin(withScreenRecorderService, 'expo-screen-recorder', '1.3.0');
