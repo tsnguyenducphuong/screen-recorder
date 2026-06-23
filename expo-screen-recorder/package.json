@@ -1,6 +1,6 @@
 {
   "name": "expo-turbo-screen-recorder",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "description": "Expo Module For High Quality Screen Recorder",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -12,7 +12,7 @@
     "expo-module.config.json"
   ],
   "scripts": {
-    "build": "expo-module build",
+    "build": "expo-module build && tsc -p plugin/tsconfig.json",
     "clean": "expo-module clean",
     "lint": "expo-module lint",
     "test": "expo-module test",
