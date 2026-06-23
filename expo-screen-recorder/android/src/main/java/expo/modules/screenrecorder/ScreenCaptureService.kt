@@ -9,6 +9,7 @@ import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -38,7 +39,7 @@ class ScreenCaptureService : Service() {
         val includeAudio = intent?.getBooleanExtra("INCLUDE_AUDIO", false) ?: false
         val quality      = intent?.getStringExtra("QUALITY")     ?: "high"
 
-        // ✅ Fix 1: Establish foreground state FIRST
+        // Step 1: Establish foreground state FIRST so the OS registers the service type.
         startForegroundNotification(includeAudio)
 
         if (resultData == null) {
@@ -46,43 +47,54 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        // ✅ Fix 2: Poll and retry with a small delay to handle targetSDK 36 asynchronous Binder lag.
-        val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        var attempts = 0
-        val maxAttempts = 5
-        val delayMs = 100L
+        // Step 2: Yield the main thread via postDelayed so the Binder IPC for startForeground()
+        // can complete on the system side before getMediaProjection() is called.
+        // On targetSDK 36, calling getMediaProjection() synchronously after startForeground()
+        // on the same thread causes a SecurityException because the OS hasn't finished
+        // registering the mediaProjection foreground service type yet.
+        Handler(mainLooper).postDelayed({
+            startRecording(resultCode, resultData, outputPath, width, height, dpi, includeAudio, quality)
+        }, 300L)
 
-        while (attempts < maxAttempts) {
-            try {
-                attempts++
-                mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
-                if (mediaProjection != null) {
-                    break // Successfully acquired the token, break the loop
-                }
-            } catch (e: SecurityException) {
-                if (attempts >= maxAttempts) {
-                    // Exhausted all retries, fail safely without crashing the app
-                    e.printStackTrace()
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
-                // Sleep for 100ms to let the startForeground registration finalize on the OS side
-                try { Thread.sleep(delayMs) } catch (_: InterruptedException) {}
-            } catch (e: Exception) {
-                e.printStackTrace()
-                stopSelf()
-                return START_NOT_STICKY
-            }
+        return START_NOT_STICKY
+    }
+
+    private fun startRecording(
+        resultCode: Int,
+        resultData: Intent,
+        outputPath: String,
+        width: Int,
+        height: Int,
+        dpi: Int,
+        includeAudio: Boolean,
+        quality: String
+    ) {
+        val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+
+        try {
+            mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
+        } catch (e: SecurityException) {
+            e.printStackTrace()
+            stopSelf()
+            return
+        } catch (e: Exception) {
+            e.printStackTrace()
+            stopSelf()
+            return
+        }
+
+        if (mediaProjection == null) {
+            stopSelf()
+            return
         }
 
         try {
             setupMediaRecorder(outputPath, width, height, includeAudio, quality)
         } catch (e: Exception) {
             e.printStackTrace()
-            mediaProjection?.stop()
-            mediaProjection = null
+            cleanUp()
             stopSelf()
-            return START_NOT_STICKY
+            return
         }
 
         try {
@@ -101,12 +113,9 @@ class ScreenCaptureService : Service() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            mediaRecorder?.release()
-            mediaRecorder = null
-            mediaProjection?.stop()
-            mediaProjection = null
+            cleanUp()
             stopSelf()
-            return START_NOT_STICKY
+            return
         }
 
         try {
@@ -114,16 +123,9 @@ class ScreenCaptureService : Service() {
             isRecording = true
         } catch (e: Exception) {
             e.printStackTrace()
-            virtualDisplay?.release()
-            virtualDisplay = null
-            mediaRecorder?.release()
-            mediaRecorder = null
-            mediaProjection?.stop()
-            mediaProjection = null
+            cleanUp()
             stopSelf()
         }
-
-        return START_NOT_STICKY
     }
 
     private fun setupMediaRecorder(
@@ -185,8 +187,7 @@ class ScreenCaptureService : Service() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            
-            // ✅ Fix 3: Explicitly bind MICROPHONE type if audio is included.
+
             if (includeAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 serviceType = serviceType or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
@@ -196,21 +197,19 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    override fun onDestroy() {
-        if (isRecording) {
-            try { mediaRecorder?.stop() } catch (_: Exception) {}
-            isRecording = false
-        }
-
+    private fun cleanUp() {
+        try { if (isRecording) mediaRecorder?.stop() } catch (_: Exception) {}
+        isRecording = false
         mediaRecorder?.release()
         mediaRecorder = null
-
         virtualDisplay?.release()
         virtualDisplay = null
-
         mediaProjection?.stop()
         mediaProjection = null
+    }
 
+    override fun onDestroy() {
+        cleanUp()
         super.onDestroy()
     }
 }
