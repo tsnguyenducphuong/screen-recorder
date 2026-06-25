@@ -2,24 +2,44 @@ import {
   ConfigPlugin,
   createRunOncePlugin,
   withAndroidManifest,
+  withInfoPlist,
 } from '@expo/config-plugins';
 
 const pkg = require('expo-turbo-screen-recorder/package.json');
 
-/**
- * Expo config plugin — adds foreground service permissions and the
- * ScreenCaptureService declaration required by the screen recorder module
- * when targeting Android SDK 36.
- *
- * In TypeScript plugins, ConfigPlugin<void> means the plugin takes no
- * options. If you later want to accept options (e.g. a custom service
- * name), change `void` to your options interface type.
- */
-const withScreenRecorderService: ConfigPlugin<void> = (config) => {
+// ---------------------------------------------------------------------------
+// Plugin options
+// ---------------------------------------------------------------------------
+
+interface ScreenRecorderPluginOptions {
+  /**
+   * iOS only — sets NSMicrophoneUsageDescription in Info.plist.
+   * Required by Apple even when the user does not enable audio, because
+   * ReplayKit internally references the microphone API.
+   * App Store will reject the binary with ITMS-90683 if this is missing.
+   * Defaults to a generic description if not supplied.
+   */
+  microphonePermission?: string;
+
+  /**
+   * iOS only — sets NSPhotoLibraryAddUsageDescription in Info.plist.
+   * Required if you save recordings to the photo library.
+   * Optional — omit if you only write to the app cache directory.
+   */
+  photoLibraryAddPermission?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Android — manifest permissions + service declaration
+// ---------------------------------------------------------------------------
+
+const withAndroidScreenRecorder: ConfigPlugin<ScreenRecorderPluginOptions> = (
+  config
+) => {
   return withAndroidManifest(config, async (config) => {
     const androidManifest = config.modResults;
 
-    // ── 1. Permissions ─────────────────────────────────────────────────────
+    // ── 1. Permissions ───────────────────────────────────────────────────────
     if (!androidManifest.manifest['uses-permission']) {
       androidManifest.manifest['uses-permission'] = [];
     }
@@ -45,23 +65,14 @@ const withScreenRecorderService: ConfigPlugin<void> = (config) => {
       }
     });
 
-    // ── 2. Service declaration ──────────────────────────────────────────────
+    // ── 2. Service declaration ───────────────────────────────────────────────
     const mainApplication = androidManifest.manifest.application![0];
-
     if (!mainApplication.service) {
       mainApplication.service = [];
     }
 
-    const serviceName =
-      'expo.modules.screenrecorder.ScreenCaptureService';
+    const serviceName = 'expo.modules.screenrecorder.ScreenCaptureService';
 
-    // ManifestServiceAttributes requires 'android:enabled' and
-    // 'android:exported' to be the StringBoolean literal union
-    // ('true' | 'false'), not the broad string type. Using `as const`
-    // on the object narrows all string values to their literal types,
-    // satisfying the ManifestService type without needing an explicit cast
-    // on every individual property.
-    //
     // foregroundServiceType must list BOTH types because the service
     // simultaneously captures the screen (mediaProjection) and the mic
     // (microphone). Omitting either causes a runtime crash on SDK 34+.
@@ -88,4 +99,72 @@ const withScreenRecorderService: ConfigPlugin<void> = (config) => {
   });
 };
 
-export default createRunOncePlugin(withScreenRecorderService, pkg.name, pkg.version);
+// ---------------------------------------------------------------------------
+// iOS — Info.plist permission strings
+// ---------------------------------------------------------------------------
+
+const withIOSScreenRecorder: ConfigPlugin<ScreenRecorderPluginOptions> = (
+  config,
+  options
+) => {
+  return withInfoPlist(config, (config) => {
+    const plist = config.modResults;
+
+    // ── NSMicrophoneUsageDescription ────────────────────────────────────────
+    // REQUIRED — Apple rejects with ITMS-90683 if this key is missing.
+    // ReplayKit references the microphone API even when isMicrophoneEnabled
+    // is false, so the key must be present regardless of audio usage.
+    // Only add if not already set — lets the app override via app.json.
+    if (!plist['NSMicrophoneUsageDescription']) {
+      plist['NSMicrophoneUsageDescription'] =
+        options?.microphonePermission ??
+        '$(PRODUCT_NAME) uses the microphone to record audio during screen recordings.';
+    }
+
+    // ── NSPhotoLibraryAddUsageDescription ───────────────────────────────────
+    // Required only if recordings are saved to the Photos library.
+    // This plugin writes to the app cache directory, so this is optional.
+    // Include it here so apps that want to save to Photos don't need a
+    // separate plugin. Only added when the caller explicitly supplies it.
+    if (
+      options?.photoLibraryAddPermission &&
+      !plist['NSPhotoLibraryAddUsageDescription']
+    ) {
+      plist['NSPhotoLibraryAddUsageDescription'] =
+        options.photoLibraryAddPermission;
+    }
+
+    // ── NO RPScreenRecordingUsageDescription needed ─────────────────────────
+    // RPScreenRecordingUsageDescription was relevant only for the deprecated
+    // RPScreenRecorder.startRecording(withMicrophoneEnabled:handler:) API.
+    // The modern startCapture(handler:completionHandler:) API used here does
+    // NOT require this key — Apple shows its own system consent sheet instead.
+
+    return config;
+  });
+};
+
+// ---------------------------------------------------------------------------
+// Combined plugin
+// ---------------------------------------------------------------------------
+
+const withScreenRecorder: ConfigPlugin<ScreenRecorderPluginOptions | void> = (
+  config,
+  options
+) => {
+  const opts: ScreenRecorderPluginOptions = options ?? {};
+
+  // Apply Android manifest changes.
+  config = withAndroidScreenRecorder(config, opts);
+
+  // Apply iOS Info.plist changes.
+  config = withIOSScreenRecorder(config, opts);
+
+  return config;
+};
+
+export default createRunOncePlugin(
+  withScreenRecorder,
+  pkg.name,
+  pkg.version
+);

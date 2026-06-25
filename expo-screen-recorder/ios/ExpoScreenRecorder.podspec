@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name           = 'ExpoScreenRecorder'
-  s.version        = '1.0.0'
+  s.version        = '1.8.2'
   s.summary        = 'High performance Expo module Screen Recorder'
   s.description    = 'Screen Recorder for Expo'
   s.author         = ''
